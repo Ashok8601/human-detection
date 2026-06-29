@@ -14,10 +14,9 @@ try:
     import RPi.GPIO as GPIO
     GPIO_AVAILABLE = True
 except ImportError:
-    print("[WARNING] RPi.GPIO library nahi mili! Hardware emulation mode me chal raha hai.")
+    print("[WARNING] RPi.GPIO library nahi mila! Hardware emulation mode me chal raha hai.")
     GPIO_AVAILABLE = False
 
-# Aapki shell script ke anusar PIN 18 select kiya gaya hai
 ALARM_PIN = 18  
 
 class VideoStreamYOLO:
@@ -46,7 +45,9 @@ class VideoStreamYOLO:
         self.latest_incident = None 
         
         # Hardware control properties
-        self.manual_alarm_active = False  # Manual override track karne ke liye
+        self.manual_alarm_active = False  
+        self.last_detection_time = 0      # Anti-flicker hold time track karne ke liye
+        self.alarm_hold_duration = 3.0    # Alarm kam se kam 3 second tak ON rahega
         
         # Initialize Raspberry Pi Pins
         self.init_hardware()
@@ -59,23 +60,26 @@ class VideoStreamYOLO:
         if GPIO_AVAILABLE:
             try:
                 GPIO.setwarnings(False)
-                GPIO.setmode(GPIO.BCM)  # Broadcom pin-numbering scheme
+                GPIO.setmode(GPIO.BCM)  
                 GPIO.setup(ALARM_PIN, GPIO.OUT)
-                GPIO.output(ALARM_PIN, GPIO.LOW)  # Shuruat me LOW (0V) rahega
+                GPIO.output(ALARM_PIN, GPIO.LOW)  
                 print(f"[SUCCESS] GPIO Hardware Initialized on PIN: {ALARM_PIN} (Output Mode)")
             except Exception as e:
                 print(f"[ERROR] GPIO Initialization Failed: {e}")
 
     def set_alarm_state(self, state):
-        """Manual ya Automatic state change handle karne ke liye utility function"""
+        """Hardware Pin control logic with safety checks"""
         if GPIO_AVAILABLE:
             try:
                 if state:
                     GPIO.output(ALARM_PIN, GPIO.HIGH)
                     print(f"[HARDWARE] Pin {ALARM_PIN} -> HIGH (3.3V)")
                 else:
-                    # Agar manual test active nahi hai tabhi low karein
-                    if not self.manual_alarm_active:
+                    # Sirf tabhi low karein jab manual test aur auto-hold dono inactive hon
+                    current_time = time.time()
+                    time_since_last_det = current_time - self.last_detection_time
+                    
+                    if not self.manual_alarm_active and (time_since_last_det >= self.alarm_hold_duration):
                         GPIO.output(ALARM_PIN, GPIO.LOW)
                         print(f"[HARDWARE] Pin {ALARM_PIN} -> LOW (0V)")
             except Exception as e:
@@ -135,7 +139,7 @@ class VideoStreamYOLO:
             class_id = int(box.cls[0])
             conf = float(box.conf[0])
             
-            if class_id == 0: # Person only
+            if class_id == 0:  # Person Only
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 center_x = int((x1 + x2) / 2)
                 center_y = int(y2)
@@ -149,23 +153,34 @@ class VideoStreamYOLO:
                     cv2.putText(frame_to_process, f"VIOLATION: {conf:.2%}", (x1, y1 - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # Agar human detect hua toh Pin 18 HIGH karo, nahi toh LOW karo
+        # --- IMPROVED ALARM LOGIC (WITH HOLD TIME) ---
+        current_time = time.time()
+        
         if human_detected:
+            self.last_detection_time = current_time  # Timer ko reset karein
             self.capture_snapshot(frame_to_process, highest_conf)
             self.set_alarm_state(True)
         else:
-            # Automatic system tabhi low karega jab manual test button off ho
-            if not self.manual_alarm_active:
+            # Agar manual alarm chal raha hai to use chalu rehne dein
+            if self.manual_alarm_active:
+                self.set_alarm_state(True)
+            # Agar hold duration (3 sec) poora ho gaya hai tabhi band karein
+            elif (current_time - self.last_detection_time) >= self.alarm_hold_duration:
                 self.set_alarm_state(False)
 
         ret, jpeg = cv2.imencode('.jpg', frame_to_process)
         return jpeg.tobytes() if ret else None
 
     def capture_snapshot(self, frame, conf):
+        # Taaki har frame par baar-baar database log aur image save na ho (1 second throttle)
         now = datetime.now()
         timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        file_ts = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
         
+        # Sirf tabhi save karein agar pichle snapshot se 1 second beet chuka ho
+        if self.latest_incident and (now - datetime.strptime(self.latest_incident["timestamp"], "%Y-%m-%d %H:%M:%S")).total_seconds() < 1.0:
+            return
+
+        file_ts = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]
         filename = f"HUMAN_INTRUSION_{file_ts}.jpg"
         filepath = os.path.join(self.snapshot_dir, filename)
         
