@@ -1,12 +1,11 @@
-
-
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, Response
+from camera import VideoStreamYOLO
 from database import init_db, get_db_connection, log_activity
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import os
 import json
 import sqlite3
-from pyngrok import ngrok
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
 app.secret_key = os.urandom(24) 
@@ -81,7 +80,8 @@ def roi_page():
 def gen_frames(camera):
     while True:
         frame = camera.get_frame()
-        if frame is None: continue
+        if frame is None: 
+            continue
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
@@ -102,7 +102,7 @@ def system_status():
     cam.latest_incident = None 
     return jsonify(status)
 
-# --- NEW: MANUAL ALARM TESTING ROUTE ---
+# --- MANUAL ALARM TESTING ROUTE ---
 @app.route('/trigger_manual_alarm', methods=['POST'])
 @login_required
 def trigger_manual_alarm():
